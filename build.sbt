@@ -11,3 +11,5 @@ sbtVersion := "0.13.11"
 libraryDependencies += "org.jsoup" % "jsoup" % "1.9.2"
 
 libraryDependencies += "org.powerscala" %% "powerscala-core" % "2.0.1"
+
+libraryDependencies += "com.outr.scribe" %% "scribe-slf4j" % "1.2.3"
