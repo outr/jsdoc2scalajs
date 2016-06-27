@@ -18,8 +18,12 @@ object JSDocParser extends Logging {
 
   def main(args: Array[String]): Unit = {
     cache.mkdirs()
-    val url = s"$baseUrl/docs/index.html"
-    val doc = Jsoup.connect(url).get()
+    val file = new File(cache, "index.html")
+    if (!file.exists()) {
+      val url = s"$baseUrl/docs/index.html"
+      IO.stream(new URL(url), file)
+    }
+    val doc = Jsoup.parse(file, "UTF-8")
     val matches = doc.select("body section article ul li a")
     val anchors = (0 until matches.size()).map(matches.get).toList
     anchors.foreach(process)
@@ -30,32 +34,112 @@ object JSDocParser extends Logging {
     val completePackage = path.replace('/', '.').substring(6) match {
       case s => s.substring(0, s.length - 5)
     }
-    val jsPackage = completePackage.substring(0, completePackage.lastIndexOf('.'))
-    val name = completePackage.substring(completePackage.indexOf('.') + 1)
-    logger.info(s"Processing $name...")
-    val file = new File(cache, s"$name.html")
-    if (!file.exists()) {
-      val url = s"$baseUrl$path"
-      IO.stream(new URL(url), file)
+    if (completePackage != "fabric") {
+      val jsPackage = completePackage.substring(0, completePackage.lastIndexOf('.'))
+      val name = completePackage.substring(completePackage.indexOf('.') + 1)
+      logger.info(s"Processing $name...")
+      val file = new File(cache, s"$name.html")
+      if (!file.exists()) {
+        val url = s"$baseUrl$path"
+        IO.stream(new URL(url), file)
+      }
+      val doc = Jsoup.parse(file, "UTF-8")
+      val description = doc.select("body > div[id=main] > section > article > div[class=container-overview] > div[class=description]").text().trim
+      val params = doc.select("body > div[id=main] > section > article > div[class=container-overview] > table[class=params] > tbody > tr > td").toTextList.grouped(3).map(l => s"${fixName(l.head)}: ${fixType(l.tail.head)}").toList
+      val articles = doc.select("body > div[id=main] > section")
+      val matches = articles.select("article > h4[class=name]").toList
+      val items = matches.flatMap(element2ObjectInfo)
+
+      //    val iterator = (0 until matches.size()).map(matches.get(_).text().trim).toIterator
+      //    var items = ListBuffer.empty[ObjectInfo]
+      //    while (iterator.hasNext) {
+      //      objectInfo(iterator).foreach(oi => items += oi)
+      //    }
+      val packageName = "com.outr.fabric"
+      val extending = doc.select("h3[class=subsection-title] + ul > li > a").text() match {
+        case "" => "js.Object"
+        case s => fixType(s)
+      }
+      val data = generate(packageName, params, extending, jsPackage, name, description, items)
+      val filename = s"$name.scala"
+      IO.stream(data, new File(outDir, filename))
     }
-    val doc = Jsoup.parse(file, "UTF-8")
-    val description = doc.select("body > div[id=main] > section > article > div[class=container-overview] > div[class=description]").text().trim
-    val params = doc.select("body > div[id=main] > section > article > div[class=container-overview] > table[class=params] > tbody > tr > td").toTextList.grouped(3).map(l => s"${fixName(l.head)}: ${fixType(l.tail.head)}").toList
-    val articles = doc.select("body > div[id=main] > section")
-    val matches = articles.select("article > h4[class=name], article > div[class=description], article > table[class=params] > tbody > tr > td[class=type]")
-    val iterator = (0 until matches.size()).map(matches.get(_).text().trim).toIterator
-    var items = ListBuffer.empty[ObjectInfo]
-    while (iterator.hasNext) {
-      objectInfo(iterator).foreach(oi => items += oi)
+  }
+  val VarTypeRegex = """[:](.+)""".r
+
+  val classNameMap = Map(
+    "delegatedProperties" -> "String",
+    "enableRetinaScaling" -> "Boolean",
+    "getSvgSrc" -> "String",
+    "type" -> "Object"
+  )
+
+  def element2ObjectInfo(element: Element): Option[ObjectInfo] = {
+    if (element.child(0).text().trim == "(static)") {
+      None
+    } else {
+      logger.debug(s"Processing $element...")
+      val name = element.childNode(1).toString
+      val c1 = element.child(1)
+      val description = element.nextElementSibling().text()
+      c1.attr("class") match {
+        case "type-signature" => {
+          val className = classNameMap.getOrElse(name, c1.text().trim match {
+            case VarTypeRegex(s) => s
+            case "" => throw new RuntimeException(s"Unspecified variable type - $element")
+          })
+          Some(VarInfo(fixName(name), fixType(className), description))
+        }
+        case "signature" => {
+          val descriptionElement = element.nextElementSibling()
+          val table = descriptionElement.nextElementSibling().nextElementSibling()
+          val args = if (table == null) {
+            name match {
+              case "onMouseUp" => List(s"pointer: ${fixType("Object")}")
+              case "render" => List.empty
+              case _ => throw new RuntimeException(s"Args table not found for: $name")
+            }
+          } else {
+            val argNames = table.select("td[class=name]").toTextList
+            val argTypes = table.select("td[class=type]").toTextList
+            argNames.zip(argTypes).map {
+              case (n, t) => s"${fixName(n)}: ${fixType(t)}"
+            }
+          }
+          val returnType = fixType(element.select("a").text().trim)
+//          println(s"METHOD: $element, Name: $name, $c1")
+//          println(s"Description: $description")
+//          println(s"Args: ${args.mkString(", ")}")
+//          println(s"Return type: $returnType")
+          Some(MethodInfo(name, args, returnType, description))
+        }
+      }
     }
-    val packageName = "com.outr.fabric"
-    val extending = doc.select("h3[class=subsection-title] + ul > li > a").text() match {
-      case "" => "js.Object"
-      case s => fixType(s)
-    }
-    val data = generate(packageName, params, extending, jsPackage, name, description, items.toList)
-    val filename = s"$name.scala"
-    IO.stream(data, new File(outDir, filename))
+    /*element.text.trim match {
+      case VarRegex(name, className) => {
+        val description = element.nextElementSibling().text()
+        println(s"Name: $name, ClassName: $className, Description: $description")
+        System.exit(0)
+        VarInfo(fixName(name), fixType(className), description)
+      }
+      case MethodRegex(name, argsString) => {
+        val descriptionElement = element.nextElementSibling()
+        val table = descriptionElement.nextElementSibling().nextElementSibling()
+        val argNames = table.select("td[class=name]").toTextList
+        val argTypes = table.select("td[class=type]").toTextList
+        val args = argNames.zip(argTypes).map {
+          case (n, t) => s"${fixName(n)}: ${fixType(t)}"
+        }
+        System.exit(0)
+        null
+        //      MethodInfo(name, args, )
+      }
+      case _ => {
+        println(s"Element: ${element.text()}")
+        System.exit(0)
+        null
+      }
+    }*/
   }
 
   def fixName(name: String): String = name match {
