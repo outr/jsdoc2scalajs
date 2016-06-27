@@ -9,7 +9,7 @@ import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
 import org.powerscala.io._
 
-import scala.collection.mutable.ListBuffer
+import scala.annotation.tailrec
 
 object JSDocParser extends Logging {
   val cache = new File("cache")
@@ -50,11 +50,6 @@ object JSDocParser extends Logging {
       val matches = articles.select("article > h4[class=name]").toList
       val items = matches.flatMap(element2ObjectInfo)
 
-      //    val iterator = (0 until matches.size()).map(matches.get(_).text().trim).toIterator
-      //    var items = ListBuffer.empty[ObjectInfo]
-      //    while (iterator.hasNext) {
-      //      objectInfo(iterator).foreach(oi => items += oi)
-      //    }
       val packageName = "com.outr.fabric"
       val extending = doc.select("h3[class=subsection-title] + ul > li > a").text() match {
         case "" => "js.Object"
@@ -74,14 +69,18 @@ object JSDocParser extends Logging {
     "type" -> "Object"
   )
 
+  val ignoreNames = Set("toString", "type")
+
   def element2ObjectInfo(element: Element): Option[ObjectInfo] = {
-    if (element.child(0).text().trim == "(static)") {
+    val name = element.childNode(1).toString
+    val c1 = element.child(1)
+    val description = element.nextElementSibling().text()
+    val details = detailsFor(element)
+    val isOverride = details.select("dl > dt[class=tag-overrides]").text().trim == "Overrides:"
+    if (element.child(0).text().trim == "(static)" || ignoreNames.contains(name) || isOverride) {
       None
     } else {
       logger.debug(s"Processing $element...")
-      val name = element.childNode(1).toString
-      val c1 = element.child(1)
-      val description = element.nextElementSibling().text()
       c1.attr("class") match {
         case "type-signature" => {
           val className = classNameMap.getOrElse(name, c1.text().trim match {
@@ -100,116 +99,47 @@ object JSDocParser extends Logging {
               case _ => throw new RuntimeException(s"Args table not found for: $name")
             }
           } else {
-            val argNames = table.select("td[class=name]").toTextList
-            val argTypes = table.select("td[class=type]").toTextList
+            val argNames = table.select("> tbody > tr > td[class=name]").toTextList
+            val argTypes = table.select("> tbody > tr > td[class=type]").toTextList
             argNames.zip(argTypes).map {
               case (n, t) => s"${fixName(n)}: ${fixType(t)}"
             }
           }
           val returnType = fixType(element.select("a").text().trim)
-//          println(s"METHOD: $element, Name: $name, $c1")
-//          println(s"Description: $description")
-//          println(s"Args: ${args.mkString(", ")}")
-//          println(s"Return type: $returnType")
           Some(MethodInfo(name, args, returnType, description))
         }
       }
     }
-    /*element.text.trim match {
-      case VarRegex(name, className) => {
-        val description = element.nextElementSibling().text()
-        println(s"Name: $name, ClassName: $className, Description: $description")
-        System.exit(0)
-        VarInfo(fixName(name), fixType(className), description)
-      }
-      case MethodRegex(name, argsString) => {
-        val descriptionElement = element.nextElementSibling()
-        val table = descriptionElement.nextElementSibling().nextElementSibling()
-        val argNames = table.select("td[class=name]").toTextList
-        val argTypes = table.select("td[class=type]").toTextList
-        val args = argNames.zip(argTypes).map {
-          case (n, t) => s"${fixName(n)}: ${fixType(t)}"
-        }
-        System.exit(0)
-        null
-        //      MethodInfo(name, args, )
-      }
-      case _ => {
-        println(s"Element: ${element.text()}")
-        System.exit(0)
-        null
-      }
-    }*/
+  }
+
+  @tailrec
+  final def detailsFor(element: Element): Element = {
+    if (element.attr("class").trim == "details") {
+      element
+    } else {
+      detailsFor(element.nextElementSibling())
+    }
   }
 
   def fixName(name: String): String = name match {
     case "object" => "`object`"
+    case "type" => "`type`"
     case _ => name
   }
 
   def fixType(classType: String): String = classType match {
     case s if s.contains("|") && s.contains("String") => "String"
+    case s if s.contains("|") && s.contains("Number") => "Double"
+    case s if s.contains("|") && s.contains("function") => "js.Function"
     case s if s.startsWith("fabric.") => s.substring(7)
     case "Event" => "org.scalajs.dom.Event"
-    case "Object" => "js.Object"
+    case "Object" | "object" => "js.Object"
     case "CanvasRenderingContext2D" => "org.scalajs.dom.CanvasRenderingContext2D"
     case "HTMLCanvasElement" => "org.scalajs.dom.raw.HTMLCanvasElement"
     case "function" => "js.Function"
     case "Self" => "Unit"
+    case "" => "js.Object"
     case s => s
-  }
-
-  def objectInfo(iterator: Iterator[String]): Option[ObjectInfo] = {
-    val heading = iterator.next()
-
-//    if (heading.startsWith("(static)")) {
-//      if (heading.indexOf("(", 2) != -1) {
-//        iterator.next()   // Skip two lines if it's a static method
-//        iterator.next()
-//      }
-//       Ignore static
-//      None
-//    } else {
-      logger.info(s"Starting with: $heading")
-      try {
-        val colon = heading.indexOf(':')
-        if (heading.contains("(")) {
-          // Method
-          val name = heading.substring(0, heading.indexOf('('))
-          val args = heading.substring(heading.indexOf('(') + 1, heading.indexOf(')')).split(",").map(_.trim).toList.collect {
-            case s if s.nonEmpty => fixName(s)
-          }
-          val index = heading.indexOf('{')
-          val returnType = if (index > -1) {
-            heading.substring(index + 1, heading.indexOf('}', index))
-          } else {
-            "Unit"
-          }
-          val description = iterator.next()
-          val argsWithTypes = args.map {
-            case argName if argName.startsWith("...") || argName.startsWith("…") => {
-              s"${argName.substring(3)}: ${fixType(iterator.next())}*"
-            }
-            case argName => s"$argName: ${fixType(iterator.next())}"
-          }
-          if (name == "toString") {
-            None
-          } else {
-            Some(MethodInfo(fixName(name), argsWithTypes, fixType(returnType), description))
-          }
-        } else {
-          // Var
-          val (name, className) = heading match {
-            case "enableRetinaScaling" => heading -> "Boolean"
-            case s => s.substring(0, colon).trim -> fixType(s.substring(colon + 1).trim)
-          }
-          val description = iterator.next()
-          Some(VarInfo(fixName(name), className, description))
-        }
-      } catch {
-        case t: Throwable => throw new RuntimeException(s"Failed to parse on $heading.", t)
-      }
-//    }
   }
 
   def generate(packageName: String, params: List[String], extending: String, jsPackage: String, name: String, description: String, entries: List[ObjectInfo]): String = {
