@@ -31,7 +31,7 @@ object JSDocParser extends Logging {
 
   val ignore = Set(
     "fabric", "fabric.util", "fabric.util.object", "fabric.util.array", "fabric.util.string", "fabric.util.ease",
-    "fabric.Image", "fabric.Image.filters", "fabric.Image.filters.BaseFilter", "fabric.Image.filters.Brightness",
+    "fabric.Image.filters", "fabric.Image.filters.BaseFilter", "fabric.Image.filters.Brightness",
     "fabric.Image.filters.Convolute", "fabric.Image.filters.GradientTransparency", "fabric.Image.filters.Grayscale",
     "fabric.Image.filters.Invert", "fabric.Image.filters.Mask", "fabric.Image.filters.Noise",
     "fabric.Image.filters.Pixelate", "fabric.Image.filters.RemoveWhite", "fabric.Image.filters.Sepia",
@@ -83,8 +83,7 @@ object JSDocParser extends Logging {
     "reOffsetsAndBlur" -> "js.Function",
     "ATTRIBUTE_NAMES" -> "js.Array[String]",
     "DEFAULT_SVG_FONT_SIZE" -> "Double",
-    "getElementStyle" -> "String",
-    "SVGElement" -> "org.scalajs.dom.raw.SVGElement"
+    "getElementStyle" -> "String"
   )
 
   val ignoreNames = Set("toString", "type", "rotate -&gt; setAngle")
@@ -96,7 +95,7 @@ object JSDocParser extends Logging {
     val details = detailsFor(element)
     val isOverride = details.select("dl > dt[class=tag-overrides]").text().trim == "Overrides:"
     val isStatic = element.child(0).text().trim == "(static)"
-    if (ignoreNames.contains(name) || isOverride) {
+    if (ignoreNames.contains(name) || (isOverride && name != "initialize")) {
       None
     } else {
       logger.debug(s"Processing $element...")
@@ -120,8 +119,16 @@ object JSDocParser extends Logging {
           } else {
             val argNames = table.select("> tbody > tr > td[class=name]").toTextList
             val argTypes = table.select("> tbody > tr > td[class=type]").toTextList
-            argNames.zip(argTypes).map {
-              case (n, t) => s"${fixName(n)}: ${fixType(t)}"
+            val argAttributes = table.select("> tbody > tr > td[class=attributes]").toTextList match {
+              case Nil => argNames.map(n => "")
+              case l => l
+            }
+            argNames.zip(argTypes).zip(argAttributes).map {
+              case ((n, t), a) => if (a == "<optional>") {
+                s"${fixName(n)}: ${fixType(t)} = ${defaultFor(fixType(t))}"
+              } else {
+                s"${fixName(n)}: ${fixType(t)}"
+              }
             }
           }
           val returnType = fixType(element.select("a").text().trim)
@@ -147,19 +154,38 @@ object JSDocParser extends Logging {
   }
 
   def fixType(classType: String): String = classType match {
+    case s if s.contains("|") && s.contains("Array") => "js.Array[String]"
     case s if s.contains("|") && s.contains("String") => "String"
     case s if s.contains("|") && s.contains("Number") => "Double"
     case s if s.contains("|") && s.contains("function") => "js.Function"
     case s if s.startsWith("fabric.") => s.substring(7)
-    case "Array" => "js.Array"
+    case "Array" | "js.Array[String]" => "js.Array[String]"
     case "Event" => "org.scalajs.dom.Event"
     case "Object" | "object" => "js.Object"
     case "CanvasRenderingContext2D" => "org.scalajs.dom.CanvasRenderingContext2D"
     case "HTMLCanvasElement" => "org.scalajs.dom.raw.HTMLCanvasElement"
-    case "function" => "js.Function"
+    case "HTMLImageElement" => "org.scalajs.dom.raw.HTMLImageElement"
+    case "function" | "js.Function" => "js.Function"
     case "Self" => "Unit"
+    case "SVGElement" => "org.scalajs.dom.raw.SVGElement"
+    case "SVGGradientElement" => "org.scalajs.dom.raw.SVGGradientElement"
+    case "Number" => "Double"
     case "" => "js.Object"
-    case s => s
+    case "String" => "String"
+    case "Boolean" => "Boolean"
+    case "Double" => "Double"
+    case s => throw new RuntimeException(s"Unsupported classType: [$classType]")
+  }
+
+  def defaultFor(classType: String): String = classType match {
+    case "js.Function" => "null"
+    case "String" => "\"\""
+    case "js.Array[String]" => "new js.Array[String]()"
+    case "js.Object" => "new js.Object()"
+    case "Boolean" => "false"
+    case "org.scalajs.dom.Event" => "null"
+    case "Double" => "0.0"
+    case _ => throw new RuntimeException(s"Unknown default for $classType.")
   }
 
   def generate(packageName: String, params: List[String], extending: String, jsPackage: String, name: String, description: String, entries: List[ObjectInfo]): String = {
@@ -176,9 +202,19 @@ object JSDocParser extends Logging {
       case Some(oi) => oi.asInstanceOf[MethodInfo].args
       case None => params
     }
-    b.append(s"class $name(${args.mkString(", ")}) extends $extending {\n")
-    val local = entries.filterNot(e => e.name == "initialize" || e.static)
-    val static = entries.filterNot(e => e.name == "initialize" || !e.static)
+    val ex = if (args.nonEmpty) {
+      extending match {
+        case "BaseBrush" => "BaseBrush"
+        case "js.Object" => "js.Object"
+        case "Object" => "Object(options)"
+        case _ => s"$extending(${args.map(s => s.substring(0, s.indexOf(':')).trim).mkString(", ")})"
+      }
+    } else {
+      extending
+    }
+    b.append(s"class $name(${args.mkString(", ")}) extends $ex {\n")
+    val local = entries.filterNot(e => e.name == "initialize" || e.static).distinct
+    val static = entries.filterNot(e => e.name == "initialize" || !e.static).distinct
     local.foreach {
       case info: VarInfo => {
         b.append(s"  /**\n")
@@ -195,7 +231,13 @@ object JSDocParser extends Logging {
     }
     b.append("}")
     if (static.nonEmpty) {
-      b.append(s"\n\nobject $name {\n")
+      b.append("\n\n")
+      b.append(s"/**\n")
+      b.append(s"  * $description\n")
+      b.append(s"  */\n")
+      b.append("@js.native\n")
+      b.append(s"""@JSName("$jsPackage.$name")\n""")
+      b.append(s"object $name extends js.Object {\n")
       static.foreach {
         case info: VarInfo => {
           b.append(s"  /**\n")
@@ -226,6 +268,20 @@ trait ObjectInfo {
   def static: Boolean
 }
 
-case class VarInfo(static: Boolean, name: String, className: String, description: String) extends ObjectInfo
+case class VarInfo(static: Boolean, name: String, className: String, description: String) extends ObjectInfo {
+  override def equals(o: scala.Any): Boolean = o match {
+    case vi: VarInfo => static == vi.static && name == vi.name
+    case _ => super.equals(o)
+  }
 
-case class MethodInfo(static: Boolean, name: String, args: List[String], returnType: String, description: String) extends ObjectInfo
+  override def hashCode(): Int = name.hashCode
+}
+
+case class MethodInfo(static: Boolean, name: String, args: List[String], returnType: String, description: String) extends ObjectInfo {
+  override def equals(o: scala.Any): Boolean = o match {
+    case mi: MethodInfo => static == mi.static && name == mi.name
+    case _ => super.equals(o)
+  }
+
+  override def hashCode(): Int = s"$name()".hashCode
+}
