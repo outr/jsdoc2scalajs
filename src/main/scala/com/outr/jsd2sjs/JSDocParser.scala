@@ -100,14 +100,14 @@ object JSDocParser extends Logging {
     } else {
       logger.debug(s"Processing $element...")
       c1.attr("class") match {
-        case "type-signature" => {
+        case "type-signature" => {      // Variable
           val className = classNameMap.getOrElse(name, c1.text().trim match {
             case VarTypeRegex(s) => s
             case "" => throw new RuntimeException(s"Unspecified variable type ($name) - $element")
           })
           Some(VarInfo(isStatic, fixName(name), fixType(className), description))
         }
-        case "signature" => {
+        case "signature" => {           // Method
           val descriptionElement = element.nextElementSibling()
           val table = descriptionElement.nextElementSibling().nextElementSibling()
           val args = if (table == null) {
@@ -131,7 +131,11 @@ object JSDocParser extends Logging {
               }
             }
           }
-          val returnType = fixType(element.select("a").text().trim)
+          val returnValue = element.select("a").text().trim match {
+            case "" => element.select("span[class=type-signature]").get(1).text()
+            case s => s
+          }
+          val returnType = fixType(returnValue)
           Some(MethodInfo(isStatic, name, args, returnType, description))
         }
       }
@@ -153,24 +157,41 @@ object JSDocParser extends Logging {
     case _ => name
   }
 
+  val returnTypeRegex = """→ [{](.+)[}]""".r
+
   def fixType(classType: String): String = classType match {
-    case s if s.contains("|") && s.contains("Array") => "js.Array[String]"
-    case s if s.contains("|") && s.contains("String") => "String"
-    case s if s.contains("|") && s.contains("Number") => "Double"
-    case s if s.contains("|") && s.contains("function") => "js.Function"
+    case returnTypeRegex(ct) => fixType(ct)
+    case s if s.contains("|") => if (s.contains("Array")) {
+      "js.Array[String]"
+    } else if (s.contains("Number")) {
+      "Double"
+    } else if (s.contains("String")) {
+      "String"
+    } else if (s.contains("Double")) {
+      "Double"
+    } else if (s.contains("function")) {
+      "js.Function"
+    } else if (s.contains("Boolean")) {
+      "Boolean"
+    } else {
+      throw new RuntimeException(s"Unsupported multi-class type: $s")
+    }
     case s if s.startsWith("fabric.") => s.substring(7)
     case "Array" | "js.Array[String]" => "js.Array[String]"
     case "Event" => "org.scalajs.dom.Event"
     case "Object" | "object" => "js.Object"
     case "CanvasRenderingContext2D" => "org.scalajs.dom.CanvasRenderingContext2D"
+    case "CanvasGradient" => "org.scalajs.dom.CanvasGradient"
+    case "CanvasPattern" => "org.scalajs.dom.CanvasPattern"
     case "HTMLCanvasElement" => "org.scalajs.dom.raw.HTMLCanvasElement"
     case "HTMLImageElement" => "org.scalajs.dom.raw.HTMLImageElement"
     case "function" | "js.Function" => "js.Function"
-    case "Self" => "Unit"
+    case "Self" | "void" => "Unit"
     case "SVGElement" => "org.scalajs.dom.raw.SVGElement"
     case "SVGGradientElement" => "org.scalajs.dom.raw.SVGGradientElement"
     case "Number" => "Double"
     case "" => "js.Object"
+    case "Any" => "Any"
     case "String" => "String"
     case "Boolean" => "Boolean"
     case "Double" => "Double"
