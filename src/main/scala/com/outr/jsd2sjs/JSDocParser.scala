@@ -15,6 +15,15 @@ object JSDocParser extends Logging {
   val cache = new File("cache")
   val baseUrl = "http://fabricjs.com"
   val outDir = new File("/home/mhicks/projects/open-source/scalajs-fabricjs/src/main/scala/com/outr/fabric/")
+  val extrasForClass = Map(
+    "Object" -> List(
+      MethodInfo(false, "on", List("eventName: String", "handler: js.Function"), "Unit", "Observes specified event"),
+      MethodInfo(false, "off", List("eventName: String", "handler: js.Function"), "Unit", "Stops event observing for a particular event handler. Calling this method without arguments removes all handlers for all events")
+    )
+  )
+  val excludesForClass = Map(
+    "IText" -> Set("on", "off")
+  )
 
   def main(args: Array[String]): Unit = {
     cache.mkdirs()
@@ -209,7 +218,10 @@ object JSDocParser extends Logging {
     case _ => throw new RuntimeException(s"Unknown default for $classType.")
   }
 
-  def generate(packageName: String, params: List[String], extending: String, jsPackage: String, name: String, description: String, entries: List[ObjectInfo]): String = {
+  def generate(packageName: String, params: List[String], extending: String, jsPackage: String, name: String, description: String, infos: List[ObjectInfo]): String = {
+    val excludes = excludesForClass.getOrElse(name, Set.empty)
+    val entries = (infos ::: extrasForClass.getOrElse(name, Nil)).filterNot(i => excludes.contains(i.name))
+
     val b = new StringBuilder
     b.append(s"package $packageName\n\n")
     b.append("import scala.scalajs.js\n")
